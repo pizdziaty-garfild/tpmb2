@@ -1,0 +1,41 @@
+# TPMB2 - Gitignore
+
+# Virtual environments
+tpmb2_env/
+venv/
+env/
+.venv/
+
+# Logs
+logs/*.log
+logs/*.log.*
+
+# Configuration secrets
+config/.key
+config/settings.json
+config/groups.json
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.so
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+.tox/
