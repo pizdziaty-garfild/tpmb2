@@ -1,0 +1,27 @@
+# TPMB2 - Enhanced Telegram Bot Requirements
+
+# Core dependencies
+python-telegram-bot>=20.7
+
+# Security and encryption
+cryptography>=41.0.0
+certifi>=2023.7.22
+requests>=2.31.0
+
+# Time synchronization
+ntplib>=0.4.0
+
+# Utilities
+python-dateutil>=2.8.2
+
+# SOCKS5 Proxy support
+aiohttp-socks>=0.8.4
+
+# GUI (tkinter is built into Python)
+# For alternative GUI frameworks (optional):
+# PyQt6>=6.5.0
+# PySide6>=6.5.0
+
+# Development and testing (optional)
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
