@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TPMB2 - Enhanced Telegram Periodic Message Bot v2.1
-Main GUI application with comprehensive error handling and diagnostics
+TPMB2 - Enhanced Telegram Periodic Message Bot v2.1 - Multi-Bot Edition
+Main GUI application with comprehensive error handling, diagnostics, and multi-bot licensing
 """
 
 import sys
@@ -102,6 +102,102 @@ Continue anyway?"""
     
     return True
 
+class LicenseDialog:
+    def __init__(self, parent):
+        self.result = None
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Generate License Key")
+        self.dialog.geometry("500x350")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+        
+        # Center dialog
+        self.dialog.geometry("+%d+%d" % (parent.winfo_rootx() + 50, parent.winfo_rooty() + 50))
+        
+        self._create_widgets()
+        
+    def _create_widgets(self):
+        main_frame = ttk.Frame(self.dialog, padding=15)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Title
+        title_label = ttk.Label(main_frame, text="🔑 TPMB2 License Generator", font=('Arial', 12, 'bold'))
+        title_label.pack(pady=(0,15))
+        
+        # Bot name input
+        ttk.Label(main_frame, text="Bot Name (for reference):").pack(anchor=tk.W, pady=(0,5))
+        self.bot_name_var = tk.StringVar(value="My Bot")
+        ttk.Entry(main_frame, textvariable=self.bot_name_var, width=40).pack(fill=tk.X, pady=(0,15))
+        
+        # Days valid
+        ttk.Label(main_frame, text="License validity (days):").pack(anchor=tk.W, pady=(0,5))
+        self.days_var = tk.StringVar(value="365")
+        ttk.Entry(main_frame, textvariable=self.days_var, width=10).pack(anchor=tk.W, pady=(0,15))
+        
+        # Hardware lock
+        self.hw_lock_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(main_frame, text="Hardware lock (bind to this computer)", variable=self.hw_lock_var).pack(anchor=tk.W, pady=(0,15))
+        
+        # Generate button
+        ttk.Button(main_frame, text="🎯 Generate License Key", command=self._generate_key).pack(pady=(0,15))
+        
+        # Result area
+        ttk.Label(main_frame, text="Generated License Key:").pack(anchor=tk.W, pady=(0,5))
+        self.result_text = scrolledtext.ScrolledText(main_frame, height=4, wrap=tk.WORD)
+        self.result_text.pack(fill=tk.BOTH, expand=True, pady=(0,15))
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X)
+        ttk.Button(button_frame, text="Copy Key", command=self._copy_key).pack(side=tk.LEFT, padx=(0,10))
+        ttk.Button(button_frame, text="Close", command=self._close).pack(side=tk.RIGHT)
+        
+    def _generate_key(self):
+        try:
+            from utils.licensing import LicenseManager
+            from utils.config import Config
+            
+            days = int(self.days_var.get())
+            if days < 1:
+                raise ValueError("Days must be > 0")
+                
+            config = Config()
+            token = config.get_bot_token()
+            if not token:
+                messagebox.showerror("Error", "No bot token configured! Set token first in Configuration.")
+                return
+                
+            lm = LicenseManager()
+            hwid = lm.get_hwid() if self.hw_lock_var.get() else None
+            
+            key = lm.generate_key(bot_token=token, days_valid=days, hwid=hwid)
+            
+            result = f"""License Key: {key}
+
+Bot Name: {self.bot_name_var.get()}
+Valid for: {days} days
+Hardware Lock: {'Yes' if hwid else 'No'}
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+⚠️ Keep this key secure - it grants access to your bot!
+"""
+            
+            self.result_text.delete('1.0', tk.END)
+            self.result_text.insert('1.0', result)
+            self.result = key
+            
+        except Exception as e:
+            messagebox.showerror("Generation Error", f"Failed to generate license: {e}")
+    
+    def _copy_key(self):
+        if self.result:
+            self.dialog.clipboard_clear()
+            self.dialog.clipboard_append(self.result)
+            messagebox.showinfo("Copied", "License key copied to clipboard!")
+    
+    def _close(self):
+        self.dialog.destroy()
+
 class GroupEditDialog:
     def __init__(self, parent, group_id, group_name="", group_interval=None):
         self.result = None
@@ -177,14 +273,18 @@ class TPMB2GUI:
             from bot.core import TelegramBot
             from utils.config import Config
             from utils.logger import setup_logger
+            from utils.bots_registry import BotRegistry
+            from utils.licensing import LicenseManager
             
             self.root = tk.Tk()
-            self.root.title("TPMB2 - Enhanced Bot Manager v2.1")
-            self.root.geometry("1000x750")
-            self.root.minsize(820, 580)
+            self.root.title("TPMB2 - Enhanced Bot Manager v2.1 - Multi-Bot Edition")
+            self.root.geometry("1100x800")
+            self.root.minsize(900, 650)
             
             self.bot = None
             self.config = Config()
+            self.registry = BotRegistry()
+            self.licenser = LicenseManager()
             self.logger = setup_logger()
             self.bot_thread = None
             self.is_running = False
@@ -237,12 +337,13 @@ Technical details:
             bot_menu.add_command(label="Stop Bot", command=self._stop_bot)
             menubar.add_cascade(label="Bot", menu=bot_menu)
             
-            # Status frame
+            # Status frame with license indicator
             status_frame = ttk.LabelFrame(self.root, text="Status", padding=10)
             status_frame.pack(fill=tk.X, padx=10, pady=5)
             
             self.status_var = tk.StringVar(value="Stopped")
             self.groups_var = tk.StringVar(value="0")
+            self.license_var = tk.StringVar(value="❌ No License")
             self.interval_var = tk.StringVar(value=str(self.config.get_interval_minutes()))
             
             ttk.Label(status_frame, text="Status:").grid(row=0, column=0, sticky=tk.W)
@@ -250,7 +351,11 @@ Technical details:
             self.status_label.grid(row=0, column=1, sticky=tk.W, padx=(5,20))
             
             ttk.Label(status_frame, text="Groups:").grid(row=0, column=2, sticky=tk.W)
-            ttk.Label(status_frame, textvariable=self.groups_var).grid(row=0, column=3, sticky=tk.W, padx=(5,0))
+            ttk.Label(status_frame, textvariable=self.groups_var).grid(row=0, column=3, sticky=tk.W, padx=(5,20))
+            
+            ttk.Label(status_frame, text="License:").grid(row=0, column=4, sticky=tk.W)
+            self.license_label = ttk.Label(status_frame, textvariable=self.license_var, font=('Arial', 8))
+            self.license_label.grid(row=0, column=5, sticky=tk.W, padx=(5,0))
             
             # Control frame
             ctrl_frame = ttk.LabelFrame(self.root, text="Control", padding=10)
@@ -280,6 +385,11 @@ Technical details:
             notebook.add(config_tab, text="Configuration")
             self._create_config_tab(config_tab)
             
+            # Bot Management tab (NEW!)
+            bot_mgmt_tab = ttk.Frame(notebook)
+            notebook.add(bot_mgmt_tab, text="Bot Management")
+            self._create_bot_management_tab(bot_mgmt_tab)
+            
             # Logs tab
             logs_tab = ttk.Frame(notebook)
             notebook.add(logs_tab, text="Logs")
@@ -295,6 +405,416 @@ Technical details:
             messagebox.showerror("UI Error", f"Failed to create user interface: {e}")
             raise
     
+    def _create_bot_management_tab(self, parent):
+        """NEW: Bot Management tab with multi-bot and licensing features"""
+        try:
+            parent.columnconfigure(1, weight=1)
+            
+            # Active Bot Selection
+            active_frame = ttk.LabelFrame(parent, text="🤖 Active Bot Selection", padding=10)
+            active_frame.grid(row=0, column=0, columnspan=2, sticky=tk.EW, padx=10, pady=(0,10))
+            active_frame.columnconfigure(1, weight=1)
+            
+            ttk.Label(active_frame, text="Active Bot:").grid(row=0, column=0, sticky=tk.W, pady=2)
+            self.active_bot_var = tk.StringVar()
+            self.bot_combo = ttk.Combobox(active_frame, textvariable=self.active_bot_var, state="readonly", width=40)
+            self.bot_combo.grid(row=0, column=1, sticky=tk.EW, padx=(10,0), pady=2)
+            self.bot_combo.bind('<<ComboboxSelected>>', self._on_bot_selected)
+            
+            bot_buttons_frame = ttk.Frame(active_frame)
+            bot_buttons_frame.grid(row=0, column=2, padx=(10,0))
+            ttk.Button(bot_buttons_frame, text="Set Active", command=self._set_active_bot).pack(side=tk.LEFT, padx=(0,5))
+            ttk.Button(bot_buttons_frame, text="Add Bot", command=self._add_bot).pack(side=tk.LEFT, padx=5)
+            ttk.Button(bot_buttons_frame, text="Remove", command=self._remove_bot).pack(side=tk.LEFT, padx=5)
+            
+            # License Management
+            license_frame = ttk.LabelFrame(parent, text="🔑 License Management", padding=10)
+            license_frame.grid(row=1, column=0, columnspan=2, sticky=tk.EW, padx=10, pady=(0,10))
+            license_frame.columnconfigure(1, weight=1)
+            
+            ttk.Label(license_frame, text="License Key:").grid(row=0, column=0, sticky=tk.W, pady=2)
+            self.license_key_var = tk.StringVar()
+            ttk.Entry(license_frame, textvariable=self.license_key_var, width=50, font=('Consolas', 9)).grid(row=0, column=1, sticky=tk.EW, padx=(10,0), pady=2)
+            
+            license_buttons_frame = ttk.Frame(license_frame)
+            license_buttons_frame.grid(row=0, column=2, padx=(10,0))
+            ttk.Button(license_buttons_frame, text="Validate", command=self._validate_license).pack(side=tk.LEFT, padx=(0,5))
+            ttk.Button(license_buttons_frame, text="Activate", command=self._activate_license).pack(side=tk.LEFT, padx=5)
+            
+            # License Status
+            ttk.Label(license_frame, text="Status:").grid(row=1, column=0, sticky=tk.W, pady=(10,2))
+            self.license_status_var = tk.StringVar(value="No license configured")
+            self.license_status_label = ttk.Label(license_frame, textvariable=self.license_status_var, font=('Arial', 9))
+            self.license_status_label.grid(row=1, column=1, sticky=tk.W, padx=(10,0), pady=(10,2))
+            
+            # License Tools
+            tools_frame = ttk.LabelFrame(parent, text="🛠️ License Tools", padding=10)
+            tools_frame.grid(row=2, column=0, columnspan=2, sticky=tk.EW, padx=10, pady=(0,10))
+            
+            ttk.Button(tools_frame, text="🎯 Generate License Key", command=self._generate_license).pack(side=tk.LEFT, padx=(0,10))
+            ttk.Button(tools_frame, text="📋 Check HWID", command=self._show_hwid).pack(side=tk.LEFT, padx=10)
+            ttk.Button(tools_frame, text="📊 License Info", command=self._show_license_info).pack(side=tk.LEFT, padx=10)
+            
+            # Bot Info Display
+            info_frame = ttk.LabelFrame(parent, text="📄 Bot Information", padding=10)
+            info_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.EW, tk.NS), padx=10, pady=(0,10))
+            info_frame.columnconfigure(0, weight=1)
+            info_frame.rowconfigure(0, weight=1)
+            
+            self.bot_info_text = scrolledtext.ScrolledText(info_frame, height=8, wrap=tk.WORD, font=('Consolas', 9))
+            self.bot_info_text.pack(fill=tk.BOTH, expand=True)
+            
+            # Initialize bot list
+            self._refresh_bot_list()
+            
+        except Exception as e:
+            self.logger.exception("Error creating bot management tab")
+            messagebox.showerror("Bot Management Error", f"Failed to create bot management tab: {e}")
+    
+    def _refresh_bot_list(self):
+        """Refresh the bot list in the combo box"""
+        try:
+            bots = self.registry.list_bots()
+            active_bot = self.registry.get_active_bot()
+            
+            # Add default entry if no bots exist
+            if not bots:
+                bots = ["(create first bot)"]
+                display_bots = bots
+            else:
+                # Add license status indicators
+                display_bots = []
+                for bot_id in bots:
+                    bot_data = self.registry.get_bot(bot_id)
+                    name = bot_data.get('name', bot_id)
+                    status = bot_data.get('license_status', 'inactive')
+                    
+                    if status == 'active':
+                        indicator = "✅"
+                    elif 'expired' in status or 'invalid' in status:
+                        indicator = "⚠️"
+                    else:
+                        indicator = "❌"
+                    
+                    display_bots.append(f"{indicator} {name} ({bot_id})")
+            
+            self.bot_combo['values'] = display_bots
+            
+            # Set current selection
+            if active_bot and active_bot in bots:
+                for i, bot_id in enumerate(bots):
+                    if bot_id == active_bot:
+                        self.bot_combo.current(i)
+                        break
+            elif display_bots:
+                self.bot_combo.current(0)
+            
+            self._update_bot_info()
+            
+        except Exception as e:
+            self.logger.exception("Error refreshing bot list")
+    
+    def _update_bot_info(self):
+        """Update bot info display"""
+        try:
+            active_bot = self.registry.get_active_bot()
+            
+            if not active_bot:
+                info = "No active bot selected.\n\n1. Click 'Add Bot' to create your first bot\n2. Set license key\n3. Set as active"
+                self.bot_info_text.delete('1.0', tk.END)
+                self.bot_info_text.insert('1.0', info)
+                return
+                
+            bot_data = self.registry.get_bot(active_bot)
+            token = self.config.get_bot_token()
+            
+            # Get license validation
+            license_key = bot_data.get('license_key', '')
+            license_status = "No license"
+            license_details = ""
+            
+            if license_key:
+                try:
+                    status = self.licenser.validate_key(license_key, bot_token=token or "DUMMY", hwid=self.licenser.get_hwid())
+                    if status.get('valid'):
+                        license_status = f"✅ Active (expires: 20{status.get('expires', 'XX')})"
+                    else:
+                        license_status = f"❌ Invalid ({status.get('reason', 'unknown')})"
+                        license_details = f"Reason: {status.get('reason', 'N/A')}"
+                except Exception as e:
+                    license_status = f"❌ Error: {str(e)[:50]}"
+            
+            info = f"""Bot ID: {active_bot}
+Name: {bot_data.get('name', 'Unnamed')}
+Created: {bot_data.get('created_date', 'Unknown')}
+
+License Status: {license_status}
+{license_details}
+
+License Key: {license_key[:20] + '...' if license_key else 'Not set'}
+
+Groups Count: {len(self.config.get_groups())}
+Templates Count: {len(self.config.list_templates())}
+Active Template: {self.config.get_active_template_key()}
+
+Bot Token: {'Configured' if token else 'Not set'}
+"""
+            
+            self.bot_info_text.delete('1.0', tk.END)
+            self.bot_info_text.insert('1.0', info)
+            
+        except Exception as e:
+            self.logger.exception("Error updating bot info")
+    
+    def _on_bot_selected(self, event=None):
+        """Handle bot selection change"""
+        try:
+            selection = self.bot_combo.get()
+            if not selection or "(create first bot)" in selection:
+                return
+            
+            # Extract bot ID from display string "✅ Name (bot_id)"
+            if "(" in selection and selection.endswith(")"):
+                bot_id = selection.split("(")[-1].rstrip(")")
+                bot_data = self.registry.get_bot(bot_id)
+                license_key = bot_data.get('license_key', '')
+                self.license_key_var.set(license_key)
+                self._update_license_status()
+                self._update_bot_info()
+                
+        except Exception as e:
+            self.logger.exception("Error handling bot selection")
+    
+    def _add_bot(self):
+        """Add new bot dialog"""
+        try:
+            bot_id = simpledialog.askstring("Add Bot", "Enter Bot ID (unique identifier):", parent=self.root)
+            if not bot_id:
+                return
+            
+            bot_id = bot_id.strip()
+            if bot_id in self.registry.list_bots():
+                messagebox.showerror("Error", f"Bot '{bot_id}' already exists!")
+                return
+                
+            bot_name = simpledialog.askstring("Add Bot", f"Enter display name for '{bot_id}':", parent=self.root, initialvalue=bot_id)
+            if not bot_name:
+                bot_name = bot_id
+            
+            if self.registry.add_bot(bot_id, bot_name.strip()):
+                self._refresh_bot_list()
+                self.logger.info(f"Bot added: {bot_id} ({bot_name})")
+                messagebox.showinfo("Success", f"Bot '{bot_id}' added successfully!")
+            else:
+                messagebox.showerror("Error", "Failed to add bot")
+                
+        except Exception as e:
+            self.logger.exception("Error adding bot")
+            messagebox.showerror("Add Bot Error", f"Failed to add bot: {e}")
+    
+    def _remove_bot(self):
+        """Remove selected bot"""
+        try:
+            active_bot = self.registry.get_active_bot()
+            if not active_bot:
+                messagebox.showwarning("Warning", "No bot selected")
+                return
+                
+            if messagebox.askyesno("Confirm", f"Remove bot '{active_bot}'?\n\nThis cannot be undone."):
+                if self.registry.remove_bot(active_bot):
+                    self._refresh_bot_list()
+                    self.logger.info(f"Bot removed: {active_bot}")
+                    messagebox.showinfo("Success", f"Bot '{active_bot}' removed")
+                else:
+                    messagebox.showerror("Error", "Failed to remove bot")
+                    
+        except Exception as e:
+            self.logger.exception("Error removing bot")
+            messagebox.showerror("Remove Bot Error", f"Failed to remove bot: {e}")
+    
+    def _set_active_bot(self):
+        """Set selected bot as active"""
+        try:
+            selection = self.bot_combo.get()
+            if not selection or "(create first bot)" in selection:
+                return
+            
+            # Extract bot ID from display string
+            if "(" in selection and selection.endswith(")"):
+                bot_id = selection.split("(")[-1].rstrip(")")
+                if self.registry.set_active_bot(bot_id):
+                    self._refresh_bot_list()
+                    self._update_bot_info()
+                    self.logger.info(f"Active bot changed to: {bot_id}")
+                    messagebox.showinfo("Success", f"Active bot set to: {bot_id}")
+                    
+                    # Suggest restart if bot is running
+                    if self.is_running:
+                        if messagebox.askyesno("Restart Bot", "Bot is currently running.\n\nRestart with new active bot?"):
+                            self._restart_bot()
+                else:
+                    messagebox.showerror("Error", "Failed to set active bot")
+                    
+        except Exception as e:
+            self.logger.exception("Error setting active bot")
+            messagebox.showerror("Set Active Error", f"Failed to set active bot: {e}")
+    
+    def _validate_license(self):
+        """Validate entered license key"""
+        try:
+            key = self.license_key_var.get().strip()
+            if not key:
+                messagebox.showwarning("Warning", "Enter license key first")
+                return
+                
+            token = self.config.get_bot_token()
+            if not token:
+                messagebox.showerror("Error", "No bot token configured! Set token first in Configuration.")
+                return
+                
+            status = self.licenser.validate_key(key, bot_token=token, hwid=self.licenser.get_hwid())
+            
+            if status.get('valid'):
+                messagebox.showinfo("License Valid", f"✅ License is valid!\n\nExpires: 20{status.get('expires', 'XX')}")
+            else:
+                messagebox.showerror("License Invalid", f"❌ License is invalid.\n\nReason: {status.get('reason', 'Unknown')}")
+                
+            self._update_license_status()
+            
+        except Exception as e:
+            self.logger.exception("Error validating license")
+            messagebox.showerror("Validation Error", f"Failed to validate license: {e}")
+    
+    def _activate_license(self):
+        """Activate license for current bot"""
+        try:
+            key = self.license_key_var.get().strip()
+            if not key:
+                messagebox.showwarning("Warning", "Enter license key first")
+                return
+                
+            active_bot = self.registry.get_active_bot()
+            if not active_bot:
+                messagebox.showerror("Error", "No active bot selected")
+                return
+                
+            result = self.registry.set_license(active_bot, key)
+            
+            if result.get('ok'):
+                messagebox.showinfo("Success", f"✅ License activated for bot: {active_bot}")
+                self.logger.info(f"License activated for bot: {active_bot}")
+            else:
+                messagebox.showerror("Activation Failed", f"❌ Failed to activate license.\n\nStatus: {result.get('status', {})}")
+                
+            self._refresh_bot_list()
+            self._update_license_status()
+            self._update_bot_info()
+            
+        except Exception as e:
+            self.logger.exception("Error activating license")
+            messagebox.showerror("Activation Error", f"Failed to activate license: {e}")
+    
+    def _generate_license(self):
+        """Open license generator dialog"""
+        try:
+            dialog = LicenseDialog(self.root)
+            self.root.wait_window(dialog.dialog)
+            
+            if dialog.result:
+                self.license_key_var.set(dialog.result)
+                self._update_license_status()
+                
+        except Exception as e:
+            self.logger.exception("Error generating license")
+            messagebox.showerror("Generation Error", f"Failed to generate license: {e}")
+    
+    def _show_hwid(self):
+        """Show hardware ID"""
+        try:
+            hwid = self.licenser.get_hwid()
+            messagebox.showinfo("Hardware ID", f"Your Hardware ID: {hwid}\n\nThis ID is used for hardware-locked licenses.")
+            
+        except Exception as e:
+            self.logger.exception("Error getting HWID")
+            messagebox.showerror("HWID Error", f"Failed to get hardware ID: {e}")
+    
+    def _show_license_info(self):
+        """Show detailed license information"""
+        try:
+            key = self.license_key_var.get().strip()
+            if not key:
+                messagebox.showwarning("Warning", "Enter license key first")
+                return
+                
+            try:
+                parsed = self.licenser.parse_key(key)
+                info = f"""License Key Information:
+
+Token Hash: {parsed['token_hash']}
+Expiry Date: 20{parsed['expiry']} (YYMMDD format)
+Hardware ID: {parsed['hw']}
+Checksum: {parsed['csum']}
+
+Key Format: TPMB-{parsed['token_hash'][:4]}-{parsed['token_hash'][4:8]}-{parsed['expiry'][:4]}-{parsed['expiry'][4:8]}-{parsed['hw'][:4]}-{parsed['hw'][4:8]}-{parsed['csum']}"""
+                
+                messagebox.showinfo("License Information", info)
+                
+            except Exception as parse_error:
+                messagebox.showerror("Parse Error", f"Invalid license key format:\n{parse_error}")
+                
+        except Exception as e:
+            self.logger.exception("Error showing license info")
+            messagebox.showerror("License Info Error", f"Failed to show license info: {e}")
+    
+    def _update_license_status(self):
+        """Update license status display"""
+        try:
+            active_bot = self.registry.get_active_bot()
+            if not active_bot:
+                self.license_status_var.set("No active bot selected")
+                self.license_var.set("❌ No Bot")
+                return
+                
+            bot_data = self.registry.get_bot(active_bot)
+            license_key = bot_data.get('license_key', '')
+            
+            if not license_key:
+                self.license_status_var.set("No license key configured")
+                self.license_var.set("❌ No License")
+                return
+                
+            token = self.config.get_bot_token()
+            if not token:
+                self.license_status_var.set("No bot token configured")
+                self.license_var.set("❌ No Token")
+                return
+                
+            try:
+                status = self.licenser.validate_key(license_key, bot_token=token, hwid=self.licenser.get_hwid())
+                
+                if status.get('valid'):
+                    self.license_status_var.set(f"✅ License active (expires: 20{status.get('expires', 'XX')})")
+                    self.license_var.set("✅ Active")
+                    self.license_label.config(foreground="green")
+                else:
+                    reason = status.get('reason', 'unknown')
+                    self.license_status_var.set(f"❌ License invalid: {reason}")
+                    if 'expired' in reason:
+                        self.license_var.set("⚠️ Expired")
+                        self.license_label.config(foreground="orange")
+                    else:
+                        self.license_var.set("❌ Invalid")
+                        self.license_label.config(foreground="red")
+                        
+            except Exception as e:
+                self.license_status_var.set(f"Error validating license: {str(e)[:50]}")
+                self.license_var.set("❌ Error")
+                self.license_label.config(foreground="red")
+                
+        except Exception as e:
+            self.logger.exception("Error updating license status")
+    
+    # ... (rest of the methods remain the same as before)
     def _create_config_tab(self, parent):
         try:
             parent.columnconfigure(1, weight=1)
@@ -678,6 +1198,8 @@ Technical details:
             self.token_var.set("")
             messagebox.showinfo("Success", "Token saved and encrypted!")
             self.logger.info("Bot token updated")
+            # Update license status after token change
+            self._update_license_status()
             # Token change requires manual restart
             if self.is_running:
                 messagebox.showwarning("Restart Required", "Token changed. Please STOP and START the bot manually.")
@@ -935,6 +1457,8 @@ Quick summary:
 • Groups: {len(self.config.get_groups())}
 • Active Template: {self.config.get_active_template_key()}
 • Proxy: {'Enabled' if self.config.get_proxy_config().get('enabled') else 'Disabled'}
+• Active Bot: {self.registry.get_active_bot() or 'None'}
+• License: {self.license_var.get()}
 
 View full report in logs folder."""
             
@@ -1037,6 +1561,10 @@ View full report in logs folder."""
             else:
                 self.status_var.set("Stopped")
                 self.status_label.config(foreground="red")
+            
+            # Update license status
+            self._update_license_status()
+            
         except Exception as e:
             self.logger.exception("Error updating status")
     
