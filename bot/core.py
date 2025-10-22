@@ -2,7 +2,7 @@ import asyncio
 import logging
 import ssl
 import certifi
-aiohttp
+import aiohttp
 from datetime import timedelta
 from typing import Optional, Dict, Any
 from functools import partial
@@ -36,8 +36,7 @@ class TelegramBot:
 
         self.application: Optional[Application] = None
         self.is_running = False
-        # Changed: per-group jobs instead of single job
-        self.group_jobs: Dict[int, Any] = {}  # group_id -> job
+        self.group_jobs: Dict[int, Any] = {}
 
     async def initialize(self) -> bool:
         try:
@@ -45,34 +44,31 @@ class TelegramBot:
             if not token:
                 raise ValueError("Brak waznego tokenu bota")
 
-            # Check and setup proxy if enabled
             proxy_config = self.config.get_proxy_config()
             builder = Application.builder().token(token)
             
-            if proxy_config.get("enabled", False) and ProxyConnector:
-                self.logger.info("Configuring SOCKS5 proxy...")
-                try:
-                    proxy_url = f"socks5://{proxy_config['host']}:{proxy_config['port']}"
-                    proxy_auth = None
-                    if proxy_config.get("username"):
-                        proxy_password = self.config.get_proxy_password()
-                        proxy_auth = aiohttp.BasicAuth(proxy_config["username"], proxy_password)
-                    
-                    connector = ProxyConnector.from_url(proxy_url, rdns=True)
-                    if proxy_auth:
-                        connector = ProxyConnector.from_url(proxy_url, rdns=True, proxy_auth=proxy_auth)
-                    
-                    import aiohttp
-                    session = aiohttp.ClientSession(connector=connector)
-                    builder = builder.client_session(session)
-                    self.logger.info(f"SOCKS5 proxy configured: {proxy_config['host']}:{proxy_config['port']}")
-                except Exception as e:
-                    self.logger.error(f"Failed to configure proxy: {e}")
-                    return False
-            elif proxy_config.get("enabled", False):
-                self.logger.error("Proxy enabled but aiohttp-socks not available. Install: pip install aiohttp-socks")
-                return False
-            
+            if proxy_config.get("enabled", False):
+                if ProxyConnector is None:
+                    self.logger.error("Proxy enabled but aiohttp-socks not installed. Install: pip install aiohttp-socks")
+                    # Fallback: continue without proxy instead of failing hard
+                    self.logger.warning("Continuing without proxy")
+                else:
+                    try:
+                        proxy_url = f"socks5://{proxy_config['host']}:{proxy_config['port']}"
+                        connector_kwargs = {"rdns": True}
+                        if proxy_config.get("username"):
+                            pwd = self.config.get_proxy_password()
+                            connector_kwargs.update({
+                                "username": proxy_config.get("username"),
+                                "password": pwd
+                            })
+                        connector = ProxyConnector.from_url(proxy_url, **connector_kwargs)
+                        session = aiohttp.ClientSession(connector=connector)
+                        builder = builder.client_session(session)
+                        self.logger.info(f"SOCKS5 proxy configured: {proxy_config['host']}:{proxy_config['port']}")
+                    except Exception as e:
+                        self.logger.error(f"Failed to configure proxy, continuing without proxy: {e}")
+
             self.application = builder.build()
             await self._register_handlers()
             self.time_sync.sync_system_time()
@@ -105,36 +101,26 @@ class TelegramBot:
         await self.menu_system.show_welcome_menu(update, context)
 
     async def start_messaging(self):
-        """Start messaging jobs for all groups with their individual intervals"""
-        await self.stop_messaging()  # Clear any existing jobs
-        
+        await self.stop_messaging()
         groups = self.config.get_groups_objects()
         global_interval = self.config.get_interval_minutes()
-        
         if not groups:
             self.logger.warning("No groups configured")
             return
-        
         for group in groups:
             group_id = group["id"]
             group_interval = group.get("interval") or global_interval
-            group_name = group.get("name") or f"Group {group_id}"
-            
-            # Create job for this specific group
             job = self.application.job_queue.run_repeating(
                 partial(self.send_periodic_message_to_group, group_id=group_id),
                 interval=timedelta(minutes=group_interval),
-                first=timedelta(seconds=10 + len(self.group_jobs) * 2)  # Stagger starts
+                first=timedelta(seconds=10 + len(self.group_jobs) * 2)
             )
             self.group_jobs[group_id] = job
-            self.logger.info(f"Started job for {group_name} ({group_id}): every {group_interval} min")
-        
         self.is_running = True
         self.logger.info(f"Started messaging for {len(self.group_jobs)} groups")
 
     async def stop_messaging(self):
-        """Stop all messaging jobs"""
-        for group_id, job in self.group_jobs.items():
+        for _, job in list(self.group_jobs.items()):
             if job:
                 job.schedule_removal()
         self.group_jobs.clear()
@@ -142,7 +128,6 @@ class TelegramBot:
         self.logger.info("All messaging jobs stopped")
 
     async def restart_messaging(self):
-        """Graceful restart: stop and start messaging"""
         was_running = self.is_running
         await self.stop_messaging()
         if was_running:
@@ -150,60 +135,34 @@ class TelegramBot:
             self.logger.info("Messaging restarted")
 
     async def restart_group_job(self, group_id: int):
-        """Restart job for a specific group"""
-        # Stop existing job for this group
         if group_id in self.group_jobs:
             job = self.group_jobs[group_id]
             if job:
                 job.schedule_removal()
             del self.group_jobs[group_id]
-        
-        # Start new job if we're running
         if self.is_running:
             group = self.config.get_group_by_id(group_id)
             if group:
                 group_interval = group.get("interval") or self.config.get_interval_minutes()
-                group_name = group.get("name") or f"Group {group_id}"
-                
                 job = self.application.job_queue.run_repeating(
                     partial(self.send_periodic_message_to_group, group_id=group_id),
                     interval=timedelta(minutes=group_interval),
                     first=timedelta(seconds=5)
                 )
                 self.group_jobs[group_id] = job
-                self.logger.info(f"Restarted job for {group_name} ({group_id}): every {group_interval} min")
 
     async def send_periodic_message_to_group(self, context: ContextTypes.DEFAULT_TYPE, group_id: int):
-        """Send message to a specific group"""
         try:
             self.time_sync.sync_system_time()
             message_text = self.config.get_message_text()
             if not message_text.strip():
                 self.logger.warning("Brak skonfigurowanej wiadomosci")
                 return
-            
             formatted = self.formatter.format_message(message_text)
-            
             try:
-                await context.bot.send_message(
-                    chat_id=group_id, 
-                    text=formatted, 
-                    parse_mode=ParseMode.HTML, 
-                    disable_web_page_preview=True
-                )
-                
-                # Get group info for logging
-                group = self.config.get_group_by_id(group_id)
-                group_name = group.get("name") if group else None
-                log_name = f"{group_name} ({group_id})" if group_name else str(group_id)
-                self.logger.info(f"Message sent to {log_name}")
-                
+                await context.bot.send_message(chat_id=group_id, text=formatted, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
             except Exception as e:
-                group = self.config.get_group_by_id(group_id)
-                group_name = group.get("name") if group else None
-                log_name = f"{group_name} ({group_id})" if group_name else str(group_id)
-                self.logger.error(f"Failed to send to {log_name}: {e}")
-                
+                self.logger.error(f"Failed to send to {group_id}: {e}")
         except Exception as e:
             self.logger.error(f"Error in periodic message task for group {group_id}: {e}")
 
