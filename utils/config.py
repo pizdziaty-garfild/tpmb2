@@ -1,6 +1,6 @@
 import json
 import os
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from cryptography.fernet import Fernet
 import base64
 import logging
@@ -15,6 +15,7 @@ class Config:
         os.makedirs(config_dir, exist_ok=True)
         self._ensure_encryption_key()
         self._load_or_create_config()
+        self._migrate_groups_if_needed()
 
     def _ensure_encryption_key(self):
         if not os.path.exists(self.key_file):
@@ -48,15 +49,56 @@ class Config:
                     "username": "bot_owner",
                     "description": "Administrator bota",
                     "additional_info": "Skontaktuj sie w razie pytan"
+                },
+                "proxy": {
+                    "enabled": False,
+                    "type": "socks5",
+                    "host": "127.0.0.1",
+                    "port": 1080,
+                    "username": "",
+                    "password_encrypted": ""
                 }
             }
             self._save_settings()
+        
+        # Ensure proxy config exists
+        if "proxy" not in self.settings:
+            self.settings["proxy"] = {
+                "enabled": False,
+                "type": "socks5",
+                "host": "127.0.0.1",
+                "port": 1080,
+                "username": "",
+                "password_encrypted": ""
+            }
+            self._save_settings()
+        
         if os.path.exists(self.groups_file):
             with open(self.groups_file, 'r', encoding='utf-8') as f:
                 self.groups_data = json.load(f)
         else:
             self.groups_data = {"groups": []}
             self._save_groups()
+
+    def _migrate_groups_if_needed(self):
+        """Migrate old format [int, int] to new format [{'id': int, 'name': str, 'interval': int}, ...]"""
+        groups = self.groups_data.get("groups", [])
+        if not groups:
+            return
+        
+        # Check if migration needed (first item is int)
+        if isinstance(groups[0], int):
+            self.logger.info("Migrating groups from old format to new object format")
+            migrated = []
+            for gid in groups:
+                migrated.append({
+                    "id": int(gid),
+                    "name": None,
+                    "interval": None
+                })
+            self.groups_data["groups"] = migrated
+            self._save_groups()
+            self.logger.info(f"Migrated {len(migrated)} groups to new format")
 
     def _save_settings(self):
         with open(self.settings_file, 'w', encoding='utf-8') as f:
@@ -123,15 +165,124 @@ class Config:
         self.settings["owner_info"] = info
         self._save_settings()
 
-    def get_groups(self) -> List[int]:
+    # NEW GROUP METHODS - Object format with name and interval
+    def get_groups_objects(self) -> List[Dict[str, Any]]:
+        """Get groups as list of objects: [{'id': int, 'name': str, 'interval': int}, ...]"""
         return self.groups_data.get("groups", [])
 
-    def add_group(self, group_id: int):
-        if group_id not in self.groups_data["groups"]:
-            self.groups_data["groups"].append(group_id)
-            self._save_groups()
+    def get_groups(self) -> List[int]:
+        """Backward compatibility - returns list of IDs"""
+        groups = self.get_groups_objects()
+        return [g["id"] for g in groups]
 
-    def remove_group(self, group_id: int):
-        if group_id in self.groups_data["groups"]:
-            self.groups_data["groups"].remove(group_id)
+    def add_group(self, group_id: int, name: Optional[str] = None, interval: Optional[int] = None) -> bool:
+        """Add group, returns False if already exists (duplicate)"""
+        groups = self.get_groups_objects()
+        # Check for duplicates
+        for g in groups:
+            if g["id"] == group_id:
+                return False  # Duplicate
+        
+        groups.append({
+            "id": group_id,
+            "name": name,
+            "interval": interval
+        })
+        self.groups_data["groups"] = groups
+        self._save_groups()
+        return True
+
+    def remove_group(self, group_id: int) -> bool:
+        """Remove group by ID, returns True if found and removed"""
+        groups = self.get_groups_objects()
+        original_len = len(groups)
+        groups = [g for g in groups if g["id"] != group_id]
+        if len(groups) < original_len:
+            self.groups_data["groups"] = groups
             self._save_groups()
+            return True
+        return False
+
+    def update_group(self, group_id: int, name: Optional[str] = None, interval: Optional[int] = None) -> bool:
+        """Update group name/interval, returns True if found"""
+        groups = self.get_groups_objects()
+        for g in groups:
+            if g["id"] == group_id:
+                if name is not None:
+                    g["name"] = name
+                if interval is not None:
+                    g["interval"] = interval
+                self.groups_data["groups"] = groups
+                self._save_groups()
+                return True
+        return False
+
+    def get_group_by_id(self, group_id: int) -> Optional[Dict[str, Any]]:
+        """Get single group object by ID"""
+        for g in self.get_groups_objects():
+            if g["id"] == group_id:
+                return g
+        return None
+
+    def deduplicate_groups(self) -> int:
+        """Remove duplicate group IDs, returns count removed"""
+        groups = self.get_groups_objects()
+        seen_ids = set()
+        unique_groups = []
+        removed_count = 0
+        
+        for g in groups:
+            if g["id"] not in seen_ids:
+                seen_ids.add(g["id"])
+                unique_groups.append(g)
+            else:
+                removed_count += 1
+        
+        if removed_count > 0:
+            self.groups_data["groups"] = unique_groups
+            self._save_groups()
+            self.logger.info(f"Removed {removed_count} duplicate groups")
+        
+        return removed_count
+
+    # PROXY METHODS
+    def get_proxy_config(self) -> Dict[str, Any]:
+        """Get proxy configuration"""
+        return self.settings.get("proxy", {
+            "enabled": False,
+            "type": "socks5",
+            "host": "127.0.0.1",
+            "port": 1080,
+            "username": "",
+            "password_encrypted": ""
+        })
+
+    def set_proxy_config(self, enabled: bool, host: str = "127.0.0.1", port: int = 1080, 
+                        username: str = "", password: str = "", proxy_type: str = "socks5"):
+        """Set proxy configuration with encrypted password"""
+        password_encrypted = ""
+        if password:
+            enc = self._cipher().encrypt(password.encode())
+            password_encrypted = base64.b64encode(enc).decode()
+        
+        self.settings["proxy"] = {
+            "enabled": enabled,
+            "type": proxy_type,
+            "host": host,
+            "port": int(port),
+            "username": username,
+            "password_encrypted": password_encrypted
+        }
+        self._save_settings()
+
+    def get_proxy_password(self) -> str:
+        """Get decrypted proxy password"""
+        proxy = self.get_proxy_config()
+        password_encrypted = proxy.get("password_encrypted", "")
+        if not password_encrypted:
+            return ""
+        try:
+            enc = base64.b64decode(password_encrypted)
+            return self._cipher().decrypt(enc).decode()
+        except Exception:
+            return ""
