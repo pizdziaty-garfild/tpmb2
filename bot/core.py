@@ -19,6 +19,8 @@ except ImportError:
 from utils.config import Config
 from utils.logger import setup_logger
 from utils.time_sync import TimeSync
+from utils.bots_registry import BotRegistry
+from utils.licensing import LicenseManager
 from bot.menus import MenuSystem
 from bot.commands import AdminCommands
 from bot.formatting import MessageFormatter
@@ -27,6 +29,8 @@ from bot.security import SecurityManager
 class TelegramBot:
     def __init__(self):
         self.config = Config()
+        self.registry = BotRegistry()
+        self.licenser = LicenseManager()
         self.logger = setup_logger()
         self.time_sync = TimeSync()
         self.menu_system = MenuSystem()
@@ -38,11 +42,31 @@ class TelegramBot:
         self.is_running = False
         self.group_jobs: Dict[int, Any] = {}
 
+    def _check_license(self) -> bool:
+        token = self.security.get_secure_token()
+        active_id = self.registry.get_active_bot()
+        if not active_id:
+            self.logger.warning("No active bot in registry; proceed without license gate")
+            return True
+        bot = self.registry.get_bot(active_id)
+        key = bot.get("license_key")
+        if not key:
+            self.logger.error("License key missing for active bot")
+            return False
+        status = self.licenser.validate_key(key, bot_token=token, hwid=self.licenser.get_hwid())
+        if not status.get("valid"):
+            self.logger.error(f"License invalid: {status}")
+            return False
+        return True
+
     async def initialize(self) -> bool:
         try:
             token = self.security.get_secure_token()
             if not token:
                 raise ValueError("Brak waznego tokenu bota")
+
+            if not self._check_license():
+                raise ValueError("License check failed - activate license for active bot")
 
             proxy_config = self.config.get_proxy_config()
             builder = Application.builder().token(token)
@@ -50,7 +74,6 @@ class TelegramBot:
             if proxy_config.get("enabled", False):
                 if ProxyConnector is None:
                     self.logger.error("Proxy enabled but aiohttp-socks not installed. Install: pip install aiohttp-socks")
-                    # Fallback: continue without proxy instead of failing hard
                     self.logger.warning("Continuing without proxy")
                 else:
                     try:
@@ -72,7 +95,7 @@ class TelegramBot:
             self.application = builder.build()
             await self._register_handlers()
             self.time_sync.sync_system_time()
-            self.logger.info("Bot TPMB2 zainicjalizowany")
+            self.logger.info("Bot TPMB2 zainicjalizowany (license OK)")
             return True
         except Exception as e:
             self.logger.error(f"Inicjalizacja nieudana: {e}")
@@ -80,6 +103,7 @@ class TelegramBot:
 
     async def _register_handlers(self):
         app = self.application
+        app.add_handler(CommandHandler("license", self._cmd_license))
         app.add_handler(CommandHandler("start", self.admin_commands.start_command))
         app.add_handler(CommandHandler("stop", self.admin_commands.stop_command))
         app.add_handler(CommandHandler("message", self.admin_commands.message_command))
@@ -91,6 +115,28 @@ class TelegramBot:
         app.add_handler(CallbackQueryHandler(self.menu_system.handle_callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_user_message))
         app.add_error_handler(self.error_handler)
+
+    async def _cmd_license(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            if not update.message:
+                return
+            args = context.args or []
+            if not args:
+                await update.message.reply_text("Usage: /license TPMB-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX")
+                return
+            key = args[0].strip()
+            token = self.security.get_secure_token()
+            status = self.licenser.validate_key(key, bot_token=token, hwid=self.licenser.get_hwid())
+            if not status.get("valid"):
+                await update.message.reply_text(f"❌ License invalid: {status}")
+                return
+            active_id = self.registry.get_active_bot() or 'default'
+            self.registry.set_license(active_id, key)
+            await update.message.reply_text("✅ License activated for active bot")
+        except Exception as e:
+            self.logger.error(f"/license error: {e}")
+            if update.message:
+                await update.message.reply_text("❌ Error while processing license")
 
     async def handle_user_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.message or not update.effective_user:
