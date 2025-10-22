@@ -11,6 +11,11 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import threading
 import asyncio
+import tempfile
+import zipfile
+import io
+import json
+from urllib.request import urlopen, Request
 from datetime import datetime
 
 # Add paths
@@ -47,8 +52,8 @@ class TPMB2GUI:
         
         self.root = tk.Tk()
         self.root.title("TPMB2 - Enhanced Bot Manager")
-        self.root.geometry("900x650")
-        self.root.minsize(700, 500)
+        self.root.geometry("980x680")
+        self.root.minsize(760, 520)
         
         self.bot = None
         self.config = Config()
@@ -66,6 +71,8 @@ class TPMB2GUI:
         self.root.config(menu=menubar)
         
         file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Update from GitHub", command=self._safe_update_from_github)
+        file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_close)
         menubar.add_cascade(label="File", menu=file_menu)
         
@@ -170,9 +177,20 @@ class TPMB2GUI:
         ttk.Button(ctrl_frame, text="Add", command=self._add_group).grid(row=0, column=2)
         ttk.Button(ctrl_frame, text="Remove Selected", command=self._remove_group).grid(row=0, column=3, padx=(10,0))
         
+        # Bulk paste area
+        bulk_frame = ttk.LabelFrame(parent, text="Bulk add groups (one per line)")
+        bulk_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), padx=0, pady=(0,10))
+        self.bulk_groups_text = scrolledtext.ScrolledText(bulk_frame, height=6, width=60)
+        self.bulk_groups_text.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        
+        bulk_buttons = ttk.Frame(parent)
+        bulk_buttons.grid(row=2, column=0, sticky=tk.W, pady=(0,10))
+        ttk.Button(bulk_buttons, text="Add Bulk", command=self._add_bulk_groups).pack(side=tk.LEFT)
+        ttk.Button(bulk_buttons, text="Clear Bulk", command=lambda: self.bulk_groups_text.delete('1.0', tk.END)).pack(side=tk.LEFT, padx=6)
+        
         # Groups list
         self.groups_list = tk.Listbox(parent)
-        self.groups_list.grid(row=1, column=0, sticky=(tk.W,tk.E,tk.N,tk.S))
+        self.groups_list.grid(row=3, column=0, sticky=(tk.W,tk.E,tk.N,tk.S))
         self._refresh_groups()
     
     def _start_bot(self):
@@ -257,15 +275,42 @@ class TPMB2GUI:
             messagebox.showerror("Error", "Enter valid number of minutes!")
             self.interval_var.set(str(self.config.get_interval_minutes()))
     
+    def _normalize_group_id(self, raw: str) -> int:
+        val = raw.strip()
+        if not val:
+            raise ValueError("empty")
+        # auto-prefix -100 if needed
+        if val.startswith("-100"):
+            return int(val)
+        if val.startswith("-"):
+            return int("-100" + val.lstrip("-"))
+        # plain digits -> add -100 prefix
+        return int("-100" + val)
+    
     def _add_group(self):
         try:
-            gid = int(self.group_var.get())
+            gid = self._normalize_group_id(self.group_var.get())
             self.config.add_group(gid)
             self.group_var.set("")
             self._refresh_groups()
             self._update_status()
-        except ValueError:
-            messagebox.showerror("Error", "Group ID must be a number!")
+        except Exception:
+            messagebox.showerror("Error", "Invalid Group ID!")
+    
+    def _add_bulk_groups(self):
+        text = self.bulk_groups_text.get('1.0', tk.END)
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        added, skipped = 0, 0
+        for ln in lines:
+            try:
+                gid = self._normalize_group_id(ln)
+                self.config.add_group(gid)
+                added += 1
+            except Exception:
+                skipped += 1
+        self._refresh_groups()
+        self._update_status()
+        messagebox.showinfo("Bulk add", f"Added: {added}\nSkipped: {skipped}")
     
     def _remove_group(self):
         sel = self.groups_list.curselection()
@@ -332,6 +377,68 @@ class TPMB2GUI:
                 self.root.after(1000, self.root.destroy)
         else:
             self.root.destroy()
+    
+    def _safe_update_from_github(self):
+        """Simple updater: fetches latest main.zip from GitHub tpmb2 repo and replaces files safely.
+        Steps:
+        - Download main.zip from GitHub
+        - Extract to temp dir
+        - Copy whitelisted files into current folder
+        - Never overwrite config/ or logs/
+        """
+        try:
+            if not messagebox.askyesno("Update", "Download and apply latest update from GitHub?\nConfig and logs will be preserved."):
+                return
+            # URL to zipball (main branch)
+            zip_url = "https://codeload.github.com/pizdziaty-garfild/tpmb2/zip/refs/heads/main"
+            req = Request(zip_url, headers={"User-Agent":"TPMB2-Updater"})
+            self.root.config(cursor="watch"); self.root.update()
+            with urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            zf = zipfile.ZipFile(io.BytesIO(data))
+            tmpdir = tempfile.mkdtemp(prefix="tpmb2_update_")
+            zf.extractall(tmpdir)
+            # top-level dir inside zip
+            top = next((name for name in zf.namelist() if name.endswith('/')), None)
+            base = os.path.join(tmpdir, top) if top else tmpdir
+            
+            # Whitelist of paths to copy
+            whitelist = [
+                "main.py", "requirements.txt", ".gitignore",
+                os.path.join("bot"), os.path.join("utils"), os.path.join("gui")
+            ]
+            preserved = ["config", "logs"]
+            
+            copied = 0
+            for root_dir, dirs, files in os.walk(base):
+                rel_root = os.path.relpath(root_dir, base)
+                if rel_root == ".":
+                    rel_root = ""
+                # Skip preserved dirs
+                if any(rel_root.startswith(p) for p in preserved if rel_root != ""):
+                    continue
+                # Copy only whitelisted top-level
+                if rel_root != "" and not any(rel_root.split(os.sep)[0] == os.path.normpath(w).split(os.sep)[0] for w in whitelist):
+                    continue
+                # Ensure target dir
+                target_root = os.path.join(current_dir, rel_root) if rel_root else current_dir
+                os.makedirs(target_root, exist_ok=True)
+                # Copy files
+                for f in files:
+                    src = os.path.join(root_dir, f)
+                    dst = os.path.join(target_root, f)
+                    # Never overwrite .key or configs/logs
+                    if any(dst.startswith(os.path.join(current_dir, p)) for p in preserved):
+                        continue
+                    # Write file
+                    with open(src, 'rb') as rf, open(dst, 'wb') as wf:
+                        wf.write(rf.read())
+                        copied += 1
+            self.root.config(cursor="")
+            messagebox.showinfo("Update", f"Update applied successfully. Files updated: {copied}\nPlease restart the application.")
+        except Exception as e:
+            self.root.config(cursor="")
+            messagebox.showerror("Update failed", f"Cannot update: {e}")
     
     def run(self):
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
