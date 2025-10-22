@@ -1,0 +1,11 @@
+# Message templates for TPMB2
+# Stored in config/message_templates.json
+# Example structure:
+# {
+#   "active_template": "default",
+#   "templates": {
+#     "default": "🤖 Automatyczna wiadomość! Czas: {timestamp}",
+#     "promo": "🔥 PROMO! Dzisiaj {date} o {time}!",
+#     "info": "ℹ️ Informacja: {timestamp}"
+#   }
+# }
